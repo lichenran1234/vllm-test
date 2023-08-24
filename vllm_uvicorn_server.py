@@ -16,7 +16,7 @@ TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
 
 
-@app.post("/generate")
+@app.post("/invocations")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
 

@@ -29,6 +29,11 @@ async def live():
 async def ready():
     return "OK"
 
+@app.post("/invocation")
+async def generate_test(request: Request) -> Response:
+    print(request.body())
+    return JSONResponse({})
+
 @app.post("/invocations")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.

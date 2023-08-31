@@ -15,10 +15,16 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
 
+# Use `async def` rather than `def` so this function will be executed in the main
+# event loop (together with model invocation requests). Therefore, "OK" response
+# from this endpoint indicates the main event loop is healthy.
 @app.get("/v2/health/live")
 async def live():
     return "OK"
 
+# Use `async def` rather than `def` so this function will be executed in the main
+# event loop (together with model invocation requests). Therefore, "OK" response
+# from this endpoint indicates the main event loop is healthy.
 @app.get("/v2/health/ready")
 async def ready():
     return "OK"

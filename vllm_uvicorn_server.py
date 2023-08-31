@@ -15,6 +15,13 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
 
+@app.get("/v2/health/live")
+async def live():
+    return "OK"
+
+@app.get("/v2/health/ready")
+async def ready():
+    return "OK"
 
 @app.post("/invocations")
 async def generate(request: Request) -> Response:
@@ -69,8 +76,8 @@ async def generate(request: Request) -> Response:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8080)
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 

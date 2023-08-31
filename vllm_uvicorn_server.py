@@ -40,29 +40,28 @@ async def generate(request: Request) -> Response:
     """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
-    stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
-    # Streaming case
-    async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output in results_generator:
-            prompt = request_output.prompt
-            text_outputs = [
-                prompt + output.text for output in request_output.outputs
-            ]
-            ret = {"text": text_outputs}
-            yield (json.dumps(ret) + "\0").encode("utf-8")
+    # Streaming not supported yet
+    # async def stream_results() -> AsyncGenerator[bytes, None]:
+    #     async for request_output in results_generator:
+    #         prompt = request_output.prompt
+    #         text_outputs = [
+    #             prompt + output.text for output in request_output.outputs
+    #         ]
+    #         ret = {"text": text_outputs}
+    #         yield (json.dumps(ret) + "\0").encode("utf-8")
 
-    async def abort_request() -> None:
-        await engine.abort(request_id)
+    # async def abort_request() -> None:
+    #     await engine.abort(request_id)
 
-    if stream:
-        background_tasks = BackgroundTasks()
-        # Abort the request if the client disconnects.
-        background_tasks.add_task(abort_request)
-        return StreamingResponse(stream_results(), background=background_tasks)
+    # if stream:
+    #     background_tasks = BackgroundTasks()
+    #     # Abort the request if the client disconnects.
+    #     background_tasks.add_task(abort_request)
+    #     return StreamingResponse(stream_results(), background=background_tasks)
 
     # Non-streaming case
     final_output = None

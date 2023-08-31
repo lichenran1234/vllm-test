@@ -31,7 +31,8 @@ async def ready():
 
 @app.post("/invocation")
 async def generate_test(request: Request) -> Response:
-    print(request.body())
+    body = await request.body()
+    print(body)
     return JSONResponse({})
 
 @app.post("/invocations")

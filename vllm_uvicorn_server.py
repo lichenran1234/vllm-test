@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import pandas as pd
 from typing import AsyncGenerator
 
@@ -16,6 +17,8 @@ from input_data_parser import read_input_data
 
 
 SUPPORTED_SAMPLING_PARAMS = ["presence_penalty", "frequency_penalty", "temperature", "top_p", "top_k", "stop", "max_tokens"]
+TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", "/model/components/tokenizer")
+MODEL_BINARY_PATH = os.environ.get("MODEL_BINARY_PATH", "/model/model")
 
 
 app = FastAPI()
@@ -123,6 +126,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--model", type=str, default=MODEL_BINARY_PATH)
+    parser.add_argument("--tokenizer", type=str, default=TOKENIZER_PATH)
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 

@@ -19,6 +19,7 @@ from input_data_parser import read_input_data
 SUPPORTED_SAMPLING_PARAMS = ["presence_penalty", "frequency_penalty", "temperature", "top_p", "top_k", "stop", "max_tokens"]
 TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", "/model/components/tokenizer")
 MODEL_BINARY_PATH = os.environ.get("MODEL_BINARY_PATH", "/model/model")
+NUM_GPUS = os.environ.get("NUM_GPUS", "1")
 
 
 app = FastAPI()
@@ -128,6 +129,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--model", type=str, default=MODEL_BINARY_PATH)
     parser.add_argument("--tokenizer", type=str, default=TOKENIZER_PATH)
+    parser.add_argument("--tensor-parallel-size", type=int, default=int(NUM_GPUS))
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 

@@ -27,12 +27,12 @@ PAYLOAD_LOGGING_INFERENCE_ID_KEY = os.environ.get(
 
 def read_input_data(request_body):
     json_input_str = request_body.decode("utf-8")
-    
+
     try:
         decoded_input = json.loads(json_input_str)
     except json.decoder.JSONDecodeError as ex:
         raise Exception(f"Invalid input. Ensure that input is a valid JSON formatted string. Error: '{ex}'")
-    
+
     if isinstance(decoded_input, dict):
         format_keys = set(decoded_input.keys()).intersection(SUPPORTED_FORMATS)
         if len(format_keys) != 1:
@@ -58,25 +58,25 @@ def read_input_data(request_body):
     message = f"Received unexpected input type '{type(decoded_input)}'"
     raise Exception(f"Invalid input. {REQUIRED_INPUT_FORMAT}. {message}.")
 
-    
+
 def _parse_tf_serving_input(inp_dict):
     """
     :param inp_dict: A dict deserialized from a JSON string formatted as described in TF's
                      serving API doc
                      (https://www.tensorflow.org/tfx/serving/api_rest#request_format_2)
     """
-    
+
     def cast_schema_type(input_data):
         if isinstance(input_data, dict):
             return {k: np.array(v) for k, v in input_data.items()}
         return np.array(input_data)
-    
+
     if "signature_name" in inp_dict:
         raise Exception("Invalid input. 'signature_name' parameter is currently not supported.")
-    
+
     if not (list(inp_dict.keys()) == ["instances"] or list(inp_dict.keys()) == ["inputs"]):
         raise Exception("Invalid input. One of 'instances' and 'inputs' must be specified (not both or any other keys).")
-    
+
     if "instances" in inp_dict:
         items = inp_dict["instances"]
         if len(items) > 0 and isinstance(items[0], dict):
@@ -91,7 +91,7 @@ def _parse_tf_serving_input(inp_dict):
     else:
         items = inp_dict["inputs"]
         data = cast_schema_type(items)
-    
+
     # Sanity check inputted data. This check will only be applied when the row-format `instances`
     # is used since it requires same 0-th dimension for all items.
     if isinstance(data, dict) and "instances" in inp_dict:
@@ -99,19 +99,18 @@ def _parse_tf_serving_input(inp_dict):
         expected_len = len(list(data.values())[0])
         if not all(len(v) == expected_len for v in data.values()):
             raise Exception("Invalid input. The length of values for each input/column name are not the same.")
-    
+
     return data
-    
-    
+
+
 def _dataframe_from_parsed_json(decoded_input, pandas_orient):
     """
     Convert parsed json into pandas.DataFrame.
-
     :param decoded_input: Parsed json - either a list or a dictionary.
     :param pandas_orient: pandas data frame convention used to store the data.
     :return: pandas.DataFrame.
     """
-    
+
     if pandas_orient == "records":
         if not isinstance(decoded_input, list):
             typemessage = "dictionary" if isinstance(decoded_input, dict) else f"type {type(decoded_input)}"

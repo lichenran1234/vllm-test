@@ -16,15 +16,14 @@ INPUTS = "inputs"
 
 SUPPORTED_FORMATS = set([DF_RECORDS, DF_SPLIT, INSTANCES, INPUTS])
 
-REQUIRED_INPUT_FORMAT = f"The input must be a JSON dictionary with exactly one of the input fields {SUPPORTED_FORMATS}"
+SUPPORTED_SAMPLING_PARAMS = ["temperature", "max_tokens", "stop", "candidate_count", "top_p"]
 
-# Payload logging is not yet supported in this Uvicorn vLLM server.
-# This key is only needed for properly parsing the input.
-PAYLOAD_LOGGING_INFERENCE_ID_KEY = os.environ.get(
-    "PAYLOAD_LOGGING_INFERENCE_ID_KEY", "inference_id"
-)
+REQUIRED_INPUT_FORMAT = "The input schema should either be in OpenAI format or conform to the documentation here: https://docs.databricks.com/en/machine-learning/model-serving/llm-optimized-model-serving.html#input-and-output-schema-format"
 
 
+# See these docs for the Optimized LLM Inference input format:
+# https://docs.google.com/document/d/14i9iuYhcn5CA4pVlXyH72BgTTOzYlDMm6B3hX1KZhRc/edit
+# https://docs.google.com/document/d/1eSk5lnawHE3squhgCrQyVlcwbnl-8lrZ75ePArCvCjI/edit
 def read_input_data(request_body):
     json_input_str = request_body.decode("utf-8")
 
@@ -33,30 +32,114 @@ def read_input_data(request_body):
     except json.decoder.JSONDecodeError as ex:
         raise Exception(f"Invalid input. Ensure that input is a valid JSON formatted string. Error: '{ex}'")
 
+    should_use_open_ai_format = False
     if isinstance(decoded_input, dict):
         format_keys = set(decoded_input.keys()).intersection(SUPPORTED_FORMATS)
-        if len(format_keys) != 1:
-            message = f"Received dictionary with input fields: {format_keys}"
-            raise Exception(f"Invalid input. {REQUIRED_INPUT_FORMAT}. {message}.")
-        format = format_keys.pop()
-        if format in (INSTANCES, INPUTS):
-            # Remove the inference_id from the input dict before passing it to parse_tf_serving_input.
-            # Otherwise it will throw an error.
-            filtered_input = {
-                k: decoded_input[k]
-                for k in decoded_input
-                if k != PAYLOAD_LOGGING_INFERENCE_ID_KEY
-            }
-            return _parse_tf_serving_input(filtered_input)
-        elif format == DF_SPLIT:
-            return _dataframe_from_parsed_json(decoded_input[DF_SPLIT], pandas_orient="split")
-        elif format == DF_RECORDS:
-            return _dataframe_from_parsed_json(decoded_input[DF_RECORDS], pandas_orient="records")
+        if len(format_keys) > 1:
+            message = f"Received dictionary with input fields: {list(format_keys)}"
+            raise Exception(f"Invalid input. {message}. {REQUIRED_INPUT_FORMAT}.")
+        elif len(format_keys) == 0:
+            # No format keys (i.e. dataframe_records, dataframe_split, instances, inputs).
+            # So we expect OpenAI input format.
+            # See this doc for the decision on OpenAI format:
+            # https://docs.google.com/document/d/1eSk5lnawHE3squhgCrQyVlcwbnl-8lrZ75ePArCvCjI/edit
+            should_use_open_ai_format = True
+        else:
+            format = format_keys.pop()
+            if format in (INSTANCES, INPUTS):
+                filtered_input = {format: decoded_input[format]}
+                prompt = _parse_tf_serving_input(filtered_input)
+            elif format == DF_SPLIT:
+                prompt = _dataframe_from_parsed_json(decoded_input[DF_SPLIT], pandas_orient="split")
+            elif format == DF_RECORDS:
+                prompt = _dataframe_from_parsed_json(decoded_input[DF_RECORDS], pandas_orient="records")
     elif isinstance(decoded_input, list):
-        raise Exception(f"Invalid input. {REQUIRED_INPUT_FORMAT}. Received a list.")
+        raise Exception(f"Invalid input. Received a list. {REQUIRED_INPUT_FORMAT}.")
+    else:
+        message = f"Received unexpected input type '{type(decoded_input)}'"
+        raise Exception(f"Invalid input. {message}. {REQUIRED_INPUT_FORMAT}.")
 
-    message = f"Received unexpected input type '{type(decoded_input)}'"
-    raise Exception(f"Invalid input. {REQUIRED_INPUT_FORMAT}. {message}.")
+    if should_use_open_ai_format:
+        if "prompt" not in decoded_input:
+            raise Exception(f"Invalid input. {REQUIRED_INPUT_FORMAT}.")
+        prompt = decoded_input.pop("prompt")
+        if isinstance(prompt, list):
+            pass
+        elif isinstance(prompt, str):
+            prompt = [prompt]
+        else:
+            raise Exception(f"Invalid input. 'prompt' should either be an str or a list. {REQUIRED_INPUT_FORMAT}.")
+
+        sampling_params = {}
+        for param, default_value in [("temperature", 0.001), ("max_tokens", 100), ("n", 1), ("top_p", 1)]:
+            sampling_params[param] = decoded_input.pop(param, default_value)
+        if 'stop' in decoded_input and decoded_input['stop'] is not None:
+            # Handle 'stop' with special logic.
+            sampling_params['stop'] = list(map(str, decoded_input['stop']))
+        return prompt, sampling_params, True
+
+
+    decoded_input.pop(format)
+    params = decoded_input.pop("params", {})
+    if not isinstance(params, dict):
+        message = f"'params' should be a dict rather than a '{type(params)}'"
+        raise Exception(f"Invalid input. {message}. {REQUIRED_INPUT_FORMAT}.")
+
+    if decoded_input:
+        message = f"Got unexpected keys {list(decoded_input.keys())} in the input dictionary"
+        raise Exception(f"Invalid input. {message}. {REQUIRED_INPUT_FORMAT}.")
+
+    if isinstance(prompt, pd.DataFrame):
+        prompt = prompt.to_dict(orient="series")
+    if 'prompt' not in prompt:
+        raise Exception(f"Invalid input. Missing required field 'prompt'. {REQUIRED_INPUT_FORMAT}.")
+
+    sampling_params_from_legacy_input = {}
+    if len(prompt) > 1:
+        # Customer is specifying sampling params using one of {dataframe_records, dataframe_split, instances, inputs}
+        # It's no longer a valid input format after GPU public preview, but we still support it for backward
+        # compatibility. And for simplicity, for batched input, we only use the sampling params for the first data
+        # point and apply it to the whole batch.
+        for key, value in prompt.items():
+            if key in SUPPORTED_SAMPLING_PARAMS:
+                sampling_params_from_legacy_input[key] = value.tolist()[0]
+
+    # This is where the sampling params should be parsed from.
+    final_sampling_params = {}
+    for p in SUPPORTED_SAMPLING_PARAMS:
+        if p in params:
+            final_sampling_params[p] = params.pop(p)
+        elif p in sampling_params_from_legacy_input:
+            # Only get sampling params from legacy_input if it doesn't exist in the "params" dict.
+            # "Sampling params in the 'params' dict" is the new input format launched with GPU public
+            # preview, so it should take precedence.
+            final_sampling_params[p] = sampling_params_from_legacy_input[p]
+
+    if params:
+        message = (
+            f"'params' dict contains unexpected params '{list(params.keys())}'. "
+            f"Currently only {SUPPORTED_SAMPLING_PARAMS} are supported"
+        )
+        raise Exception(f"Invalid input. {message}. {REQUIRED_INPUT_FORMAT}.")
+
+    if 'stop' in final_sampling_params and final_sampling_params['stop'] is not None:
+        # Preprocess the 'stop' list. Because VLLM will go into an unrecoverable failed state
+        # if the 'stop' list contains non-str elements. We should also consider returning
+        # 'invalid input' error when there are non-str elements in the 'stop' list.
+        final_sampling_params['stop'] = list(map(str, final_sampling_params['stop']))
+
+    if 'candidate_count' in final_sampling_params:
+        final_sampling_params['n'] = final_sampling_params['candidate_count']
+        del final_sampling_params['candidate_count']
+    else:
+        final_sampling_params['n'] = 1
+
+    if 'max_tokens' not in final_sampling_params:
+        final_sampling_params['max_tokens'] = 100
+    if 'temperature' not in final_sampling_params:
+        final_sampling_params['temperature'] = 0.001
+
+    return prompt['prompt'], final_sampling_params, False
 
 
 def _parse_tf_serving_input(inp_dict):

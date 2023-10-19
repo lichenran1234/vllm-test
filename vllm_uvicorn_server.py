@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import pandas as pd
+import time
 from typing import AsyncGenerator
 
 from fastapi import BackgroundTasks, FastAPI, Request
@@ -15,8 +16,6 @@ from vllm.utils import random_uuid
 
 from input_data_parser import read_input_data
 
-
-SUPPORTED_SAMPLING_PARAMS = ["presence_penalty", "frequency_penalty", "temperature", "top_p", "top_k", "stop", "max_tokens"]
 
 app = FastAPI()
 
@@ -44,35 +43,16 @@ async def generate(request: Request) -> Response:
     try:
         # TODO: consider moving this pre-processing logic to an external thread pool
         # or process pool if it's taking too much time.
-        model_input = read_input_data(request_body)
-
-        if isinstance(model_input, pd.DataFrame):
-            model_input = model_input.to_dict(orient="series")
-        for key, value in model_input.items():
-            # Only take the first value and silently drop the rest. This means
-            # only the first prompt takes effect in each HTTP request.
-            model_input[key] = value.tolist()[0]
-
-        if "prompt" not in model_input:
-            raise Exception("Invalid input. Model input missing required field 'prompt'.")
-        prompt = model_input.pop("prompt")
-
-        sampling_params = {}
-        sampling_params["n"] = model_input.pop("candidate_count", 1)
-        for p in SUPPORTED_SAMPLING_PARAMS:
-            if p in model_input:
-                sampling_params[p] = model_input.pop(p)
-
-        if model_input:
-            raise Exception(
-                f"Invalid input. Model input contains unexpected parameters {list(model_input.keys())}."
-                f" Only these parameters are supported: {SUPPORTED_SAMPLING_PARAMS + ['prompt', 'candidate_count']}."
-            )
+        prompt, sampling_params, should_use_open_ai_format = read_input_data(request_body)
 
         # Following are mostly copied from https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/api_server.py
         sampling_params = SamplingParams(**sampling_params)
-        request_id = random_uuid()
-        results_generator = engine.generate(prompt, sampling_params, request_id)
+
+        results_generators = []
+        for p in prompt:
+            request_id = random_uuid()
+            results_generator = engine.generate(p, sampling_params, request_id)
+            results_generators.append((request_id, results_generator))
 
         # Streaming not supported yet
         # async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -94,28 +74,63 @@ async def generate(request: Request) -> Response:
         #     return StreamingResponse(stream_results(), background=background_tasks)
 
         # Non-streaming case
-        final_output = None
-        async for request_output in results_generator:
-            if await request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await engine.abort(request_id)
-                return Response(status_code=499)
-            final_output = request_output
-        if final_output is None:
-            raise Exception("Server failed to process this request.")
+        outputs = []
+        for request_id, results_generator in results_generators:
+            final_output = None
+            async for request_output in results_generator:
+                if await request.is_disconnected():
+                    # Abort the request if the client disconnects.
+                    await engine.abort(request_id)
+                final_output = request_output
+            if final_output is None:
+                raise Exception(f"Server failed to process this request. Prompt: {prompt}. Sampling params: {sampling_params}")
+            outputs.append((request_id, final_output))
 
-        prompt_length = len(final_output.prompt_token_ids)
-        candidates = []
-        output_length = 0
-        for output in final_output.outputs:
-            candidates.append({"text": output.text, "metadata": {"finish_reason": output.finish_reason}})
-            output_length += len(output.token_ids)
-        metadata = {
-            "input_tokens": prompt_length,
-            "output_tokens": output_length,
-            "total_tokens": prompt_length + output_length,
-        }
-        return JSONResponse({"predictions": [{"candidates": candidates, "metadata": metadata}]})
+        if should_use_open_ai_format:
+            # If the input is in OpenAI format, return the output in OpenAI format.
+            choices = []
+            prompt_tokens = 0
+            completion_tokens = 0
+            idx = 0
+            for request_id, final_output in outputs:
+                prompt_tokens += len(final_output.prompt_token_ids)
+                for output in final_output.outputs:
+                    choices.append({
+                        "text": output.text,
+                        "index": idx,
+                        "finish_reason": output.finish_reason
+                    })
+                    completion_tokens += len(output.token_ids)
+                    idx += 1
+            output_json_dict = {
+                "id": str(random_uuid()),
+                "object": "text_completion",
+                "created": int(time.time()),
+                "choices": choices,
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens
+                }
+            }
+            return JSONResponse(output_json_dict)
+
+        predictions = []
+        for request_id, final_output in outputs:
+            prompt_length = len(final_output.prompt_token_ids)
+            candidates = []
+            output_length = 0
+            for output in final_output.outputs:
+                candidates.append({"text": output.text, "metadata": {"finish_reason": output.finish_reason}})
+                output_length += len(output.token_ids)
+            metadata = {
+                "input_tokens": prompt_length,
+                "output_tokens": output_length,
+                "total_tokens": prompt_length + output_length,
+            }
+            predictions.append({"candidates": candidates, "metadata": metadata})
+
+        return JSONResponse({"predictions": predictions})
 
     except Exception as ex:
         # Return all errors as 400 for now.
